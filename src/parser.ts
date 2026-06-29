@@ -42,33 +42,31 @@ export function parseGitLog(depth?: number, since?: string): CommitNode[] {
       author: { name, email },
       timestamp,
       message,
-      branches: [],
+      branches: []
     });
   }
 
   return commits;
 }
 
-export function enrichWithBranches(commits: CommitNode[]): void {
+export function enrichBranches(commits: CommitNode[]): void {
   const branchOutput = execSync('git branch --all --format="%(refname:short) %(objectname)"', { encoding: 'utf-8' });
   const branchLines = branchOutput.trim().split('\n').filter(l => l.length > 0);
-
-  const shaToCommits = new Map<string, CommitNode>();
-  for (const c of commits) {
-    shaToCommits.set(c.sha, c);
-  }
-
+  const shaToBranches = new Map<string, string[]>();
   for (const line of branchLines) {
     const spaceIdx = line.indexOf(' ');
     if (spaceIdx === -1) continue;
-    const branch = line.substring(0, spaceIdx);
+    const branchName = line.substring(0, spaceIdx);
     const sha = line.substring(spaceIdx + 1).trim();
-    const node = shaToCommits.get(sha);
-    if (node) {
-      node.branches.push(branch);
+    if (!shaToBranches.has(sha)) {
+      shaToBranches.set(sha, []);
+    }
+    shaToBranches.get(sha)!.push(branchName);
+  }
+  for (const commit of commits) {
+    const branchNames = shaToBranches.get(commit.sha);
+    if (branchNames) {
+      commit.branches = branchNames;
     }
   }
 }
-
-// Re-export types for convenience
-export type { CommitNode, Author };
