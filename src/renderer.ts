@@ -2,6 +2,7 @@ import { CommitNode } from './parser.js';
 import { forceSimulation, forceLink, forceManyBody, forceCenter, forceCollide } from 'd3-force';
 import { render, Box, Text, useApp, useInput, useStdoutDimensions } from 'ink';
 import React, { useEffect, useRef, useState, useMemo } from 'react';
+import { Transform } from 'ink';
 
 interface GraphNode {
   id: string;
@@ -15,6 +16,7 @@ interface GraphNode {
   label: string;
   timestamp: number;
   branches: string[];
+  authorName: string;
 }
 
 interface GraphLink {
@@ -38,48 +40,45 @@ function getBranchColor(branchIndex: number): string {
   return BRANCH_COLORS[branchIndex % BRANCH_COLORS.length];
 }
 
-export function buildGraph(commits: CommitNode[]): GraphData {
-  const nodes: GraphNode[] = [];
-  const links: GraphLink[] = [];
-  const nodeMap = new Map<string, GraphNode>();
-
-  // Collect all unique branch names across commits
-  const allBranches = new Set<string>();
+function buildGraphData(commits: CommitNode[]): GraphData {
+  const branchSet = new Set<string>();
   for (const c of commits) {
     for (const b of c.branches) {
-      allBranches.add(b);
+      branchSet.add(b);
     }
   }
-  const branchList = Array.from(allBranches);
-  const branchColorMap = new Map<string, string>();
-  branchList.forEach((branch, i) => {
-    branchColorMap.set(branch, getBranchColor(i));
-  });
+  const branchList = Array.from(branchSet).sort();
+  const branchIndexMap = new Map<string, number>();
+  branchList.forEach((b, i) => branchIndexMap.set(b, i));
 
-  for (const commit of commits) {
-    const branch = commit.branches.length > 0 ? commit.branches[0] : 'HEAD';
-    const color = branchColorMap.get(branch) || '#888';
-    const node: GraphNode = {
-      id: commit.sha,
+  const nodes: GraphNode[] = commits.map((c) => {
+    const branchIdx = c.branches.length > 0 ? branchIndexMap.get(c.branches[0])! : 0;
+    return {
+      id: c.sha.substring(0, 7),
       x: 0,
       y: 0,
       vx: 0,
       vy: 0,
       fx: null,
       fy: null,
-      color,
-      label: commit.sha.substring(0, 7),
-      timestamp: commit.timestamp,
-      branches: commit.branches,
+      color: getBranchColor(branchIdx),
+      label: c.message.split('\
+')[0].substring(0, 40),
+      timestamp: c.timestamp,
+      branches: c.branches,
+      authorName: c.author.name,
     };
-    nodes.push(node);
-    nodeMap.set(commit.sha, node);
-  }
+  });
 
+  const nodeSet = new Set(nodes.map((n) => n.id));
+  const links: GraphLink[] = [];
   for (const commit of commits) {
+    const sourceId = commit.sha.substring(0, 7);
+    if (!nodeSet.has(sourceId)) continue;
     for (const parentSha of commit.parents) {
-      if (nodeMap.has(parentSha)) {
-        links.push({ source: commit.sha, target: parentSha });
+      const targetId = parentSha.substring(0, 7);
+      if (nodeSet.has(targetId)) {
+        links.push({ source: sourceId, target: targetId });
       }
     }
   }
@@ -87,126 +86,108 @@ export function buildGraph(commits: CommitNode[]): GraphData {
   return { nodes, links };
 }
 
-export function runSimulation(
-  graph: GraphData,
-  width: number,
-  height: number,
-  onTick: (nodes: GraphNode[]) => void
-): () => void {
-  const simulation = forceSimulation<GraphNode>(graph.nodes)
-    .force('link', forceLink<GraphNode, GraphLink>(graph.links).id(d => d.id).distance(80))
-    .force('charge', forceManyBody().strength(-300))
-    .force('center', forceCenter(width / 2, height / 2))
-    .force('collide', forceCollide(10))
-    .alphaDecay(0.02)
-    .on('tick', () => {
-      onTick(graph.nodes);
-    });
+const TOOLTIP_WIDTH = 50;
+const TOOLTIP_HEIGHT = 8;
 
-  return () => {
-    simulation.stop();
-  };
-}
-
-// Ink component for rendering the graph as characters
-interface GraphCanvasProps {
-  nodes: GraphNode[];
-  width: number;
-  height: number;
-}
-
-const GraphCanvas: React.FC<GraphCanvasProps> = ({ nodes, width, height }) => {
-  const canvas = useRef<string[][]>([]);
-
-  useEffect(() => {
-    // Initialize blank canvas
-    const newCanvas: string[][] = [];
-    for (let y = 0; y < height; y++) {
-      newCanvas[y] = [];
-      for (let x = 0; x < width; x++) {
-        newCanvas[y][x] = ' ';
-      }
-    }
-
-    // Place nodes as dots
-    for (const node of nodes) {
-      const px = Math.round(node.x);
-      const py = Math.round(node.y);
-      if (px >= 0 && px < width && py >= 0 && py < height) {
-        newCanvas[py][px] = '●';
-      }
-    }
-
-    canvas.current = newCanvas;
-  }, [nodes, width, height]);
-
+function Tooltip({ node, x, y }: { node: GraphNode; x: number; y: number }) {
+  const date = new Date(node.timestamp * 1000).toLocaleDateString();
+  const branchStr = node.branches.join(', ') || 'none';
   return (
-    <Box flexDirection="column">
-      {canvas.current.map((row, y) => (
-        <Text key={y}>{row.join('')}</Text>
-      ))}
+    <Box
+      position="absolute"
+      left={Math.min(x, process.stdout.columns - TOOLTIP_WIDTH)}
+      top={Math.min(y, process.stdout.rows - TOOLTIP_HEIGHT)}
+      width={TOOLTIP_WIDTH}
+      height={TOOLTIP_HEIGHT}
+      borderStyle="round"
+      borderColor="white"
+      backgroundColor="black"
+    >
+      <Box flexDirection="column" paddingX={1}>
+        <Text bold color="cyan">{node.label}</Text>
+        <Text color="yellow">By: {node.authorName}</Text>
+        <Text color="green">Date: {date}</Text>
+        <Text color="magenta">Branches: {branchStr}</Text>
+        <Text color="gray">ID: {node.id}</Text>
+      </Box>
     </Box>
   );
-};
-
-// Main app component
-interface AppProps {
-  commits: CommitNode[];
 }
 
-const App: React.FC<AppProps> = ({ commits }) => {
-  const { exit } = useApp();
+interface GraphCanvasProps {
+  graph: GraphData;
+  hoveredNode: GraphNode | null;
+  mouseX: number;
+  mouseY: number;
+}
+
+function GraphCanvas({ graph, hoveredNode, mouseX, mouseY }: GraphCanvasProps) {
   const { columns, rows } = useStdoutDimensions();
-  const [nodes, setNodes] = useState<GraphNode[]>([]);
-  const [simulationActive, setSimulationActive] = useState(true);
-  const stopRef = useRef<(() => void) | null>(null);
+  const scaleX = columns / 2;
+  const scaleY = rows / 2;
 
-  const graph = useMemo(() => buildGraph(commits), [commits]);
-
-  useEffect(() => {
-    const width = columns;
-    const height = rows;
-
-    const stop = runSimulation(graph, width, height, (updatedNodes) => {
-      setNodes([...updatedNodes]);
-    });
-
-    stopRef.current = stop;
-
-    // Stop simulation after 10 seconds
-    const timer = setTimeout(() => {
-      if (stopRef.current) {
-        stopRef.current();
-        setSimulationActive(false);
-      }
-    }, 10000);
-
-    return () => {
-      clearTimeout(timer);
-      if (stopRef.current) {
-        stopRef.current();
-      }
-    };
-  }, [graph, columns, rows]);
-
-  useInput((input) => {
-    if (input === 'q') {
-      exit();
-    }
+  const visibleNodes = graph.nodes.filter((n) => {
+    const sx = Math.round(n.x * scaleX + columns / 2);
+    const sy = Math.round(n.y * scaleY + rows / 2);
+    return sx >= 0 && sx < columns && sy >= 0 && sy < rows;
   });
 
   return (
-    <Box flexDirection="column" height={rows} width={columns}>
-      <Box>
-        <Text bold>Git History Mapper</Text>
-        <Text> — {nodes.length} nodes, {graph.links.length} links</Text>
-        {simulationActive && <Text color="yellow"> (simulating...)</Text>}
-      </Box>
-      <GraphCanvas nodes={nodes} width={columns} height={rows - 2} />
+    <Box position="relative" width={columns} height={rows}>
+      {visibleNodes.map((node) => {
+        const sx = Math.round(node.x * scaleX + columns / 2);
+        const sy = Math.round(node.y * scaleY + rows / 2);
+        const isHovered = hoveredNode?.id === node.id;
+        return (
+          <Box
+            key={node.id}
+            position="absolute"
+            left={sx}
+            top={sy}
+          >
+            <Text color={isHovered ? 'white' : node.color}>
+              {isHovered ? '●' : '○'}
+            </Text>
+          </Box>
+        );
+      })}
+      {hoveredNode && (
+        <Tooltip node={hoveredNode} x={mouseX} y={mouseY} />
+      )}
     </Box>
   );
-};
-
-export function renderGraph(commits: CommitNode[]): void {
-  render(<App commits={commits} />);
 }
+
+function App({ commits }: { commits: CommitNode[] }) {
+  const graph = useMemo(() => buildGraphData(commits), [commits]);
+  const [simulationNodes, setSimulationNodes] = useState<GraphNode[]>([]);
+  const [hoveredNode, setHoveredNode] = useState<GraphNode | null>(null);
+  const [mouseX, setMouseX] = useState(0);
+  const [mouseY, setMouseY] = useState(0);
+  const [cursorX, setCursorX] = useState(0);
+  const [cursorY, setCursorY] = useState(0);
+  const simRef = useRef<any>(null);
+  const { exit } = useApp();
+
+  useInput((input, key) => {
+    if (input === 'q' || key.escape) {
+      exit();
+    }
+    // Arrow keys to move cursor (simulate hover)
+    if (key.upArrow) {
+      setCursorY((y) => Math.max(0, y - 1));
+    }
+    if (key.downArrow) {
+      setCursorY((y) => Math.min(process.stdout.rows - 1, y + 1));
+    }
+    if (key.leftArrow) {
+      setCursorX((x) => Math.max(0, x - 1));
+    }
+    if (key.rightArrow) {
+      setCursorX((x) => Math.min(process.stdout.columns - 1, x + 1));
+    }
+  });
+
+  // Update hovered node based on cursor position
+  useEffect(() => {
+    const { columns, rows }
