@@ -4,82 +4,87 @@ import { CommitNode } from './parser.js';
 
 interface TimeSliderProps {
   commits: CommitNode[];
-  onRangeChange: (minTimestamp: number, maxTimestamp: number) => void;
+  onFilter: (filtered: CommitNode[]) => void;
 }
 
-const TimeSlider: React.FC<TimeSliderProps> = ({ commits, onRangeChange }) => {
-  const timestamps = useMemo(() => commits.map(c => c.timestamp).sort((a, b) => a - b), [commits]);
-  const minTime = timestamps[0] ?? 0;
-  const maxTime = timestamps[timestamps.length - 1] ?? 0;
-  const [leftPercent, setLeftPercent] = useState(0);
-  const [rightPercent, setRightPercent] = useState(100);
+function formatDate(ts: number): string {
+  const d = new Date(ts * 1000);
+  return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
+export function TimeSlider({ commits, onFilter }: TimeSliderProps) {
+  const timestamps = commits.map(c => c.timestamp).sort((a, b) => a - b);
+  const minTs = timestamps[0] || 0;
+  const maxTs = timestamps[timestamps.length - 1] || 0;
+  const [low, setLow] = useState(minTs);
+  const [high, setHigh] = useState(maxTs);
+  const [dragging, setDragging] = useState<'low' | 'high' | null>(null);
 
   useEffect(() => {
-    const minSel = minTime + (maxTime - minTime) * (leftPercent / 100);
-    const maxSel = minTime + (maxTime - minTime) * (rightPercent / 100);
-    onRangeChange(Math.round(minSel), Math.round(maxSel));
-  }, [leftPercent, rightPercent, minTime, maxTime, onRangeChange]);
+    const filtered = commits.filter(c => c.timestamp >= low && c.timestamp <= high);
+    onFilter(filtered);
+  }, [low, high, commits, onFilter]);
 
-  const handleKey = useCallback((_input: string, key: { leftArrow?: boolean; rightArrow?: boolean; upArrow?: boolean; downArrow?: boolean }) => {
-    if (key.leftArrow) {
-      setLeftPercent(prev => Math.max(0, prev - 5));
-    } else if (key.rightArrow) {
-      setLeftPercent(prev => Math.min(rightPercent - 5, prev + 5));
-    } else if (key.upArrow) {
-      setRightPercent(prev => Math.min(100, prev + 5));
-    } else if (key.downArrow) {
-      setRightPercent(prev => Math.max(leftPercent + 5, prev - 5));
+  const handleKey = useCallback((_input: string, key: { leftArrow?: boolean; rightArrow?: boolean; shift?: boolean; upArrow?: boolean; downArrow?: boolean; escape?: boolean }) => {
+    if (key.leftArrow && dragging === 'low' && low > minTs) {
+      const step = key.shift ? 86400 * 7 : 86400;
+      setLow(prev => Math.max(minTs, prev - step));
+    } else if (key.rightArrow && dragging === 'low' && low < high) {
+      const step = key.shift ? 86400 * 7 : 86400;
+      setLow(prev => Math.min(high, prev + step));
+    } else if (key.leftArrow && dragging === 'high' && high > low) {
+      const step = key.shift ? 86400 * 7 : 86400;
+      setHigh(prev => Math.max(low, prev - step));
+    } else if (key.rightArrow && dragging === 'high' && high < maxTs) {
+      const step = key.shift ? 86400 * 7 : 86400;
+      setHigh(prev => Math.min(maxTs, prev + step));
+    } else if (key.upArrow && dragging === null) {
+      setDragging('low');
+    } else if (key.downArrow && dragging === null) {
+      setDragging('high');
+    } else if (key.escape) {
+      setDragging(null);
     }
-  }, [rightPercent]);
+  }, [dragging, low, high, minTs, maxTs]);
 
   useInput(handleKey);
 
-  const barWidth = 40;
-  const leftPos = Math.round((leftPercent / 100) * barWidth);
-  const rightPos = Math.round((rightPercent / 100) * barWidth);
+  const range = maxTs - minTs || 1;
+  const lowPercent = ((low - minTs) / range) * 100;
+  const highPercent = ((high - minTs) / range) * 100;
 
-  const bar = Array.from({ length: barWidth }, (_, i) => {
-    if (i === leftPos) return '[';
-    if (i === rightPos) return ']';
-    if (i > leftPos && i < rightPos) return '=';
-    return '-';
-  }).join('');
+  const barWidth = 60;
+  const lowPos = Math.round((lowPercent / 100) * barWidth);
+  const highPos = Math.round((highPercent / 100) * barWidth);
 
-  const formatDate = (ts: number) => {
-    const d = new Date(ts * 1000);
-    return d.toISOString().split('T')[0];
-  };
+  const barChars: string[] = [];
+  for (let i = 0; i < barWidth; i++) {
+    if (i >= lowPos && i <= highPos) {
+      barChars.push('█');
+    } else {
+      barChars.push('░');
+    }
+  }
+
+  const draggingLabel = dragging === 'low' ? '←/→ adjust start' : dragging === 'high' ? '←/→ adjust end' : '↑ start ↓ end  esc:deselect';
 
   return (
     <Box flexDirection="column" padding={1}>
-      <Text>Time Slider (use ← → to move left edge, ↑ ↓ for right edge):</Text>
       <Box>
-        <Text>{formatDate(minTime + (maxTime - minTime) * (leftPercent / 100))}</Text>
+        <Text bold color="cyan">Time Range</Text>
+      </Box>
+      <Box marginY={1}>
+        <Text>{formatDate(low)}</Text>
         <Text> </Text>
-        <Text>{bar}</Text>
+        <Text backgroundColor={dragging === 'low' ? 'blue' : 'gray'}>{barChars.join('')}</Text>
         <Text> </Text>
-        <Text>{formatDate(minTime + (maxTime - minTime) * (rightPercent / 100))}</Text>
+        <Text>{formatDate(high)}</Text>
+      </Box>
+      <Box>
+        <Text dimColor>{draggingLabel}</Text>
+        <Text> </Text>
+        <Text dimColor>| {commits.filter(c => c.timestamp >= low && c.timestamp <= high).length} commits</Text>
       </Box>
     </Box>
   );
-};
-
-export default TimeSlider;
-
-function useMemo<T>(factory: () => T, deps: any[]): T {
-  return React.useMemo(factory, deps);
-}
-
-function useInput(inputHandler: (input: string, key: any) => void) {
-  React.useEffect(() => {
-    const handler = (data: Buffer) => {
-      const str = data.toString();
-      if (str === '\x1b[D') inputHandler('', { leftArrow: true });
-      else if (str === '\x1b[C') inputHandler('', { rightArrow: true });
-      else if (str === '\x1b[A') inputHandler('', { upArrow: true });
-      else if (str === '\x1b[B') inputHandler('', { downArrow: true });
-    };
-    process.stdin.on('data', handler);
-    return () => process.stdin.off('data', handler);
-  }, [inputHandler]);
 }
