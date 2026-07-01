@@ -38,141 +38,158 @@ const BRANCH_COLORS = [
 const AUTHOR_COLORS = [
   '#e6194b', '#3cb44b', '#4363d8', '#f58231', '#911eb4',
   '#42d4f4', '#f032e6', '#bfef45', '#fabed4', '#469990',
-  '#dcbeff', '#9A6324', '#800000', '#aaffc3', '#808000',
-  '#ffd8b1', '#000075', '#a9a9a9', '#fffac8', '#e6beff',
 ];
 
-function getBranchColor(branchIndex: number): string {
-  return BRANCH_COLORS[branchIndex % BRANCH_COLORS.length];
+function getBranchColor(branch: string, colorMap: Map<string, string>): string {
+  if (colorMap.has(branch)) return colorMap.get(branch)!;
+  const idx = colorMap.size % BRANCH_COLORS.length;
+  const color = BRANCH_COLORS[idx];
+  colorMap.set(branch, color);
+  return color;
 }
 
-function getAuthorColor(authorIndex: number): string {
-  return AUTHOR_COLORS[authorIndex % AUTHOR_COLORS.length];
+function getAuthorColor(author: string, colorMap: Map<string, string>): string {
+  if (colorMap.has(author)) return colorMap.get(author)!;
+  const idx = colorMap.size % AUTHOR_COLORS.length;
+  const color = AUTHOR_COLORS[idx];
+  colorMap.set(author, color);
+  return color;
 }
 
-/**
- * Converts a hex color to an ANSI 256-color code (approximate).
- */
-function hexToAnsi256(hex: string): number {
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  // Use a simple formula to map to 216 color cube
-  const rIdx = Math.round(r / 51);
-  const gIdx = Math.round(g / 51);
-  const bIdx = Math.round(b / 51);
-  return 16 + 36 * rIdx + 6 * gIdx + bIdx;
+interface RendererProps {
+  commits: CommitNode[];
+  colorMode: 'branch' | 'author';
+  timeRange: [number, number];
 }
 
-export async function renderGraph(commits: CommitNode[]): Promise<void> {
-  const [colorMode, setColorMode] = useState<'branch' | 'author'>('branch');
-  const [hoveredNode, setHoveredNode] = useState<GraphNode | null>(null);
-  const [zoom, setZoom] = useState(1);
-  const [panX, setPanX] = useState(0);
-  const [panY, setPanY] = useState(0);
+const GraphView: React.FC<RendererProps> = ({ commits, colorMode, timeRange }) => {
   const { exit } = useApp();
   const [columns, rows] = useStdoutDimensions();
-  const simulationRef = useRef<forceSimulation | null>(null);
-  const graphRef = useRef<GraphData | null>(null);
-  const [tickCount, setTickCount] = useState(0);
+  const [zoom, setZoom] = useState(1);
+  const [offsetX, setOffsetX] = useState(0);
+  const [offsetY, setOffsetY] = useState(0);
+  const [hoveredNode, setHoveredNode] = useState<GraphNode | null>(null);
+  const [graphData, setGraphData] = useState<GraphData>({ nodes: [], links: [] });
+  const simRef = useRef<any>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
 
-  useInput((input, key) => {
-    if (input === 'q') {
-      exit();
-    }
-    if (input === 'c') {
-      setColorMode((prev) => (prev === 'branch' ? 'author' : 'branch'));
-    }
-    if (key.upArrow) {
-      setPanY((p) => p - 5);
-    }
-    if (key.downArrow) {
-      setPanY((p) => p + 5);
-    }
-    if (key.leftArrow) {
-      setPanX((p) => p - 5);
-    }
-    if (key.rightArrow) {
-      setPanX((p) => p + 5);
-    }
-    if (input === '+' || input === '=') {
-      setZoom((z) => Math.min(z * 1.2, 10));
-    }
-    if (input === '-') {
-      setZoom((z) => Math.max(z / 1.2, 0.1));
-    }
-  });
+  // Filter commits based on time range
+  const filteredCommits = useMemo(() => {
+    return commits.filter(c => c.timestamp >= timeRange[0] && c.timestamp <= timeRange[1]);
+  }, [commits, timeRange]);
 
-  // Build graph data
-  const graphData = useMemo<GraphData>(() => {
-    const branchSet = new Set<string>();
-    const authorSet = new Set<string>();
-    commits.forEach((c) => {
-      c.branches.forEach((b) => branchSet.add(b));
-      authorSet.add(c.author.name);
-    });
-    const branchList = Array.from(branchSet);
-    const authorList = Array.from(authorSet);
+  // Build graph data from filtered commits
+  useEffect(() => {
+    if (filteredCommits.length === 0) return;
+
     const branchColorMap = new Map<string, string>();
     const authorColorMap = new Map<string, string>();
-    branchList.forEach((b, i) => branchColorMap.set(b, getBranchColor(i)));
-    authorList.forEach((a, i) => authorColorMap.set(a, getAuthorColor(i)));
 
     const nodeMap = new Map<string, GraphNode>();
-    const nodes: GraphNode[] = commits.map((c) => {
-      const color =
-        colorMode === 'branch'
-          ? branchColorMap.get(c.branches[0] || 'default') || '#aaaaaa'
-          : authorColorMap.get(c.author.name) || '#aaaaaa';
+    const links: GraphLink[] = [];
+
+    for (const commit of filteredCommits) {
+      if (nodeMap.has(commit.sha)) continue;
+
+      const color = colorMode === 'branch'
+        ? (commit.branches.length > 0 ? getBranchColor(commit.branches[0], branchColorMap) : '#888')
+        : getAuthorColor(commit.author.name, authorColorMap);
+
       const node: GraphNode = {
-        id: c.sha.substring(0, 7),
-        x: 0,
-        y: 0,
+        id: commit.sha,
+        x: Math.random() * 800,
+        y: Math.random() * 600,
         vx: 0,
         vy: 0,
         fx: null,
         fy: null,
         color,
-        label: c.message.split('\
+        label: commit.message.split('\
 ')[0].substring(0, 40),
-        timestamp: c.timestamp,
-        branches: c.branches,
-        authorName: c.author.name,
+        timestamp: commit.timestamp,
+        branches: commit.branches,
+        authorName: commit.author.name,
       };
-      nodeMap.set(node.id, node);
-      return node;
-    });
+      nodeMap.set(commit.sha, node);
 
-    const links: GraphLink[] = [];
-    for (const commit of commits) {
-      const sourceId = commit.sha.substring(0, 7);
-      if (!nodeMap.has(sourceId)) continue;
       for (const parentSha of commit.parents) {
-        const targetId = parentSha.substring(0, 7);
-        if (nodeMap.has(targetId)) {
-          links.push({ source: sourceId, target: targetId });
+        if (nodeMap.has(parentSha)) {
+          links.push({ source: commit.sha, target: parentSha });
         }
       }
     }
 
-    return { nodes, links };
-  }, [commits, colorMode]);
+    // Create nodes array
+    const nodes = Array.from(nodeMap.values());
 
-  // Force simulation
-  useEffect(() => {
-    const sim = forceSimulation(graphData.nodes)
-      .force('link', forceLink(graphData.links).id((d: any) => d.id).distance(80))
-      .force('charge', forceManyBody().strength(-300))
-      .force('center', forceCenter(columns / 2, rows / 2))
+    // Update links to reference node objects
+    const linkIndex = new Map<string, number>();
+    nodes.forEach((n, i) => linkIndex.set(n.id, i));
+    const resolvedLinks = links.map(l => ({
+      source: linkIndex.get(l.source)!,
+      target: linkIndex.get(l.target)!,
+    }));
+
+    // Run force simulation
+    const simulation = forceSimulation(nodes)
+      .force('link', forceLink(resolvedLinks).distance(100).strength(0.5))
+      .force('charge', forceManyBody().strength(-200))
+      .force('center', forceCenter(400, 300))
       .force('collide', forceCollide(10))
-      .alpha(1)
+      .alphaDecay(0.02)
       .on('tick', () => {
-        setTickCount((t) => t + 1);
+        setGraphData({
+          nodes: nodes.map(n => ({ ...n })),
+          links: resolvedLinks.map(l => ({
+            source: nodes[l.source as number].id,
+            target: nodes[l.target as number].id,
+          })),
+        });
       });
 
-    simulationRef.current = sim;
+    simRef.current = simulation;
 
     return () => {
-      sim.stop();
+      simulation.stop();
     };
-  }
+  }, [filteredCommits, colorMode]);
+
+  // Keyboard controls
+  useInput((input, key) => {
+    if (key.escape) {
+      exit();
+    }
+    if (key.upArrow) {
+      setOffsetY(o => o - 10 / zoom);
+    }
+    if (key.downArrow) {
+      setOffsetY(o => o + 10 / zoom);
+    }
+    if (key.leftArrow) {
+      setOffsetX(o => o - 10 / zoom);
+    }
+    if (key.rightArrow) {
+      setOffsetX(o => o + 10 / zoom);
+    }
+    if (input === '+') {
+      setZoom(z => Math.min(z * 1.2, 5));
+    }
+    if (input === '-') {
+      setZoom(z => Math.max(z / 1.2, 0.2));
+    }
+  });
+
+  // Collapse nodes that are too close to each other for display
+  const displayNodes = useMemo(() => {
+    return graphData.nodes.filter(n => {
+      const screenX = (n.x + offsetX) * zoom;
+      const screenY = (n.y + offsetY) * zoom;
+      return screenX >= 0 && screenX < columns && screenY >= 0 && screenY < rows;
+    });
+  }, [graphData, zoom, offsetX, offsetY, columns, rows]);
+
+  // Render ASCII art
+  const renderFrame = () => {
+    // Create a 2D array for the screen buffer
+    const screen: string[][] = Array.from({ length: rows }, () =>
+      Array.from({ length: columns }
