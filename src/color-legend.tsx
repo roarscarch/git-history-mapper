@@ -1,28 +1,59 @@
-import React from 'react';
-import { Box, Text } from 'ink';
+import React, { useState } from 'react';
+import { Box, Text, useInput } from 'ink';
 
-export interface ColorLegendProps {
+interface ColorLegendProps {
+  colorMode: 'branch' | 'author';
+  onToggle: () => void;
   branchColors: Map<string, string>;
   authorColors: Map<string, string>;
-  mode: 'branch' | 'author';
 }
 
-const ColorLegend: React.FC<ColorLegendProps> = ({ branchColors, authorColors, mode }) => {
-  const colors = mode === 'branch' ? branchColors : authorColors;
-  const entries = Array.from(colors.entries());
+const ColorLegend: React.FC<ColorLegendProps> = ({ colorMode, onToggle, branchColors, authorColors }) => {
+  const [collapsed, setCollapsed] = useState(false);
+
+  useInput((input, key) => {
+    if (key.tab) {
+      onToggle();
+    }
+    if (input === 'l' || input === 'L') {
+      setCollapsed(prev => !prev);
+    }
+  });
+
+  if (collapsed) {
+    return (
+      <Box borderStyle="round" borderColor="gray" paddingX={1}>
+        <Text color="gray">Press L to expand legend</Text>
+      </Box>
+    );
+  }
+
+  const entries = colorMode === 'branch'
+    ? Array.from(branchColors.entries())
+    : Array.from(authorColors.entries());
+
+  // Limit to top 10 entries to avoid clutter
+  const displayEntries = entries.slice(0, 10);
+  const overflowCount = entries.length - 10;
 
   return (
-    <Box flexDirection="column" padding={1} borderStyle="round" borderColor="gray">
-      <Text bold underline>
-        {mode === 'branch' ? 'Branch Colors' : 'Author Colors'}
-      </Text>
-      {entries.slice(0, 20).map(([key, color]) => (
-        <Box key={key} flexDirection="row" alignItems="center" marginY={0}>
-          <Box width={2} height={1} backgroundColor={color as any} marginRight={1} />
-          <Text>{key}</Text>
+    <Box borderStyle="round" borderColor="white" flexDirection="column" paddingX={1} paddingY={1}>
+      <Box>
+        <Text bold>Legend: </Text>
+        <Text color="yellow">{colorMode === 'branch' ? 'by branch' : 'by author'}</Text>
+        <Text> </Text>
+        <Text color="gray">(Tab to toggle, L to collapse)</Text>
+      </Box>
+      {displayEntries.map(([key, color]) => (
+        <Box key={key}>
+          <Text color={color}>■</Text>
+          <Text> </Text>
+          <Text>{key.length > 20 ? key.substring(0, 20) + '...' : key}</Text>
         </Box>
       ))}
-      {entries.length > 20 && <Text dimColor>...and {entries.length - 20} more</Text>}
+      {overflowCount > 0 && (
+        <Text color="gray">... and {overflowCount} more</Text>
+      )}
     </Box>
   );
 };
