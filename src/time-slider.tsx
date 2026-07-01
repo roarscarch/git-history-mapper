@@ -1,86 +1,108 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { Box, Text, useInput } from 'ink';
 
-interface TimeSliderProps {
+export interface TimeSliderProps {
   minTimestamp: number;
   maxTimestamp: number;
-  currentRange: [number, number];
-  onRangeChange: (range: [number, number]) => void;
-}
-
-function formatDate(ts: number): string {
-  const d = new Date(ts * 1000);
-  const month = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  const year = d.getFullYear();
-  return `${month}/${day}/${year}`;
+  currentMin: number;
+  currentMax: number;
+  onChange: (min: number, max: number) => void;
 }
 
 const TimeSlider: React.FC<TimeSliderProps> = ({
   minTimestamp,
   maxTimestamp,
-  currentRange,
-  onRangeChange,
+  currentMin,
+  currentMax,
+  onChange,
 }) => {
-  const [activeHandle, setActiveHandle] = useState<'left' | 'right' | null>(null);
-  const range = maxTimestamp - minTimestamp;
-  const leftPct = range === 0 ? 0 : ((currentRange[0] - minTimestamp) / range) * 100;
-  const rightPct = range === 0 ? 100 : ((currentRange[1] - minTimestamp) / range) * 100;
+  const [active, setActive] = useState<'min' | 'max' | null>(null);
+  const [valueMin, setValueMin] = useState(currentMin);
+  const [valueMax, setValueMax] = useState(currentMax);
 
-  useInput((input, key) => {
-    if (!activeHandle) {
-      if (input === 't') setActiveHandle('left');
-      else if (input === 'y') setActiveHandle('right');
-      return;
-    }
+  useEffect(() => {
+    setValueMin(currentMin);
+    setValueMax(currentMax);
+  }, [currentMin, currentMax]);
 
-    const step = range * 0.01;
-    let newRange: [number, number] = [...currentRange];
+  const range = maxTimestamp - minTimestamp || 1;
+  const minPercent = ((valueMin - minTimestamp) / range) * 100;
+  const maxPercent = ((valueMax - minTimestamp) / range) * 100;
 
-    if (activeHandle === 'left') {
-      if (key.leftArrow) newRange[0] = Math.max(minTimestamp, currentRange[0] - step);
-      else if (key.rightArrow) newRange[0] = Math.min(currentRange[1], currentRange[0] + step);
-      else if (input === 't') setActiveHandle(null);
-    } else if (activeHandle === 'right') {
-      if (key.leftArrow) newRange[1] = Math.max(currentRange[0], currentRange[1] - step);
-      else if (key.rightArrow) newRange[1] = Math.min(maxTimestamp, currentRange[1] + step);
-      else if (input === 'y') setActiveHandle(null);
-    }
+  const handleKey = useCallback(
+    (input: string, key: { leftArrow?: boolean; rightArrow?: boolean; upArrow?: boolean; downArrow?: boolean; escape?: boolean; tab?: boolean }) => {
+      if (key.escape) {
+        setActive(null);
+        return;
+      }
+      if (key.tab) {
+        if (active === 'min') setActive('max');
+        else if (active === 'max') setActive('min');
+        else setActive('min');
+        return;
+      }
+      if (active === 'min') {
+        if (key.leftArrow || key.downArrow) {
+          const step = range / 100;
+          const newVal = Math.max(minTimestamp, valueMin - step);
+          setValueMin(newVal);
+          onChange(newVal, valueMax);
+        } else if (key.rightArrow || key.upArrow) {
+          const step = range / 100;
+          const newVal = Math.min(valueMax, valueMin + step);
+          setValueMin(newVal);
+          onChange(newVal, valueMax);
+        }
+      } else if (active === 'max') {
+        if (key.leftArrow || key.downArrow) {
+          const step = range / 100;
+          const newVal = Math.max(valueMin, valueMax - step);
+          setValueMax(newVal);
+          onChange(valueMin, newVal);
+        } else if (key.rightArrow || key.upArrow) {
+          const step = range / 100;
+          const newVal = Math.min(maxTimestamp, valueMax + step);
+          setValueMax(newVal);
+          onChange(valueMin, newVal);
+        }
+      }
+    },
+    [active, minTimestamp, maxTimestamp, valueMin, valueMax, range, onChange]
+  );
 
-    if (newRange[0] !== currentRange[0] || newRange[1] !== currentRange[1]) {
-      onRangeChange(newRange);
-    }
-  });
+  useInput(handleKey);
+
+  const formatDate = (ts: number): string => {
+    const d = new Date(ts * 1000);
+    return d.toISOString().split('T')[0];
+  };
 
   return (
-    <Box flexDirection="column" paddingX={1} paddingY={1} borderStyle="round" borderColor="cyan">
-      <Box>
-        <Text bold>Time Range: </Text>
-        <Text color="green">{formatDate(currentRange[0])}</Text>
-        <Text> — </Text>
-        <Text color="green">{formatDate(currentRange[1])}</Text>
-      </Box>
+    <Box flexDirection="column" padding={1} borderStyle="round" borderColor="gray">
+      <Text bold>Time Slider</Text>
       <Box marginTop={1}>
-        <Box width={2}><Text> </Text></Box>
+        <Text wrap="end">
+          Bar: {formatDate(valueMin)} — {formatDate(valueMax)}
+        </Text>
+      </Box>
+      <Box marginTop={1} flexDirection="row" alignItems="center">
+        <Text>{'['}</Text>
         <Box width={40}>
-          <Box position="relative">
-            <Text>
-              {''.padStart(Math.round(leftPct * 0.4), '─')}
-              <Text color="yellow" bold>◀</Text>
-              {''.padStart(Math.max(0, Math.round((rightPct - leftPct) * 0.4) - 1), '─')}
-              <Text color="yellow" bold>▶</Text>
-              {''.padStart(Math.max(0, 40 - Math.round(rightPct * 0.4) - 2), '─')}
-            </Text>
-          </Box>
+          <Text wrap="end">
+            {minPercent > 0 ? ' '.repeat(Math.floor(minPercent * 0.4)) : ''}
+            {active === 'min' ? '◀' : '●'}
+            {maxPercent > minPercent
+              ? '─'.repeat(Math.floor((maxPercent - minPercent) * 0.4))
+              : ''}
+            {active === 'max' ? '▶' : '●'}
+            {maxPercent < 100 ? ' '.repeat(Math.floor((100 - maxPercent) * 0.4)) : ''}
+          </Text>
         </Box>
-        <Box width={2}><Text> </Text></Box>
+        <Text>{']'}</Text>
       </Box>
       <Box marginTop={1}>
         <Text dimColor>
-          Press <Text color="cyan">t</Text> to adjust left handle,{' '}
-          <Text color="cyan">y</Text> for right handle,{' '}
-          <Text color="cyan">←</Text>/<Text color="cyan">→</Text> to move,{' '}
-          <Text color="cyan">t</Text>/<Text color="cyan">y</Text> again to release
+          Tab: switch handle | ←/→: adjust | Esc: done
         </Text>
       </Box>
     </Box>
