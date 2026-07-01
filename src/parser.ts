@@ -39,162 +39,125 @@ export class CommitParser extends EventEmitter {
         args.push(`--since=${since}`);
       }
 
-      const child = spawn('git', args, { stdio: ['ignore', 'pipe', 'pipe'] });
-      let lineCount = 0;
+      const git = spawn('git', args, { stdio: ['ignore', 'pipe', 'pipe'] });
 
-      child.stdout?.on('data', (data: Buffer) => {
+      let lineCount = 0;
+      let errorOutput = '';
+
+      git.stdout.on('data', (data: Buffer) => {
         this.buffer += data.toString();
-        const lines = this.buffer.split('\
-');
-        // Keep the last incomplete line in the buffer
+        const lines = this.buffer.split('\n');
         this.buffer = lines.pop() || '';
 
         for (const line of lines) {
-          const trimmed = line.trim();
-          if (trimmed.length === 0) continue;
-          const commit = this.parseLine(trimmed);
-          if (commit) {
-            this.commits.push(commit);
-            lineCount++;
-            if (lineCount % batchSize === 0) {
-              this.emit('progress', { parsed: lineCount, total: depth || 'unknown' });
-            }
+          if (line.trim() === '') continue;
+          lineCount++;
+          const parts = line.split('|');
+          if (parts.length < 6) continue;
+
+          const [sha, parentsStr, authorName, authorEmail, timestampStr, ...messageParts] = parts;
+          const message = messageParts.join('|');
+          const parents = parentsStr ? parentsStr.split(' ') : [];
+          const timestamp = parseInt(timestampStr, 10);
+
+          const commit: CommitNode = {
+            sha,
+            parents,
+            author: { name: authorName, email: authorEmail },
+            timestamp,
+            message,
+            branches: [],
+          };
+          this.commits.push(commit);
+
+          if (lineCount % batchSize === 0) {
+            this.emit('progress', { processed: lineCount, total: depth || 'unknown' });
           }
         }
       });
 
-      child.on('close', (code) => {
-        // Process any remaining buffer
-        if (this.buffer.trim().length > 0) {
-          const commit = this.parseLine(this.buffer.trim());
-          if (commit) {
-            this.commits.push(commit);
-            lineCount++;
-          }
-        }
-        this.buffer = '';
+      git.stderr.on('data', (data: Buffer) => {
+        errorOutput += data.toString();
+      });
+
+      git.on('close', (code) => {
         if (code !== 0) {
-          reject(new Error(`git log failed with exit code ${code}`));
-        } else {
-          this.emit('progress', { parsed: lineCount, total: lineCount });
-          this.emit('done', this.commits);
-          resolve(this.commits);
+          reject(new Error(`git log exited with code ${code}: ${errorOutput}`));
+          return;
         }
+        // Process any remaining buffer
+        if (this.buffer.trim()) {
+          const line = this.buffer.trim();
+          const parts = line.split('|');
+          if (parts.length >= 6) {
+            const [sha, parentsStr, authorName, authorEmail, timestampStr, ...messageParts] = parts;
+            const message = messageParts.join('|');
+            const parents = parentsStr ? parentsStr.split(' ') : [];
+            const timestamp = parseInt(timestampStr, 10);
+            this.commits.push({
+              sha,
+              parents,
+              author: { name: authorName, email: authorEmail },
+              timestamp,
+              message,
+              branches: [],
+            });
+          }
+        }
+        this.emit('progress', { processed: this.commits.length, total: this.commits.length });
+        resolve(this.commits);
       });
 
-      child.on('error', (err) => {
+      git.on('error', (err) => {
         reject(err);
       });
     });
   }
 
-  private parseLine(line: string): CommitNode | null {
-    const parts = line.split('|');
-    if (parts.length < 6) return null;
-
-    const [sha, parentsRaw, name, email, ts, ...msgParts] = parts;
-    const parents = parentsRaw ? parentsRaw.split(' ') : [];
-    const timestamp = parseInt(ts, 10);
-    if (isNaN(timestamp)) return null;
-    const message = msgParts.join('|');
-
-    return {
-      sha,
-      parents,
-      author: { name, email },
-      timestamp,
-      message,
-      branches: [], // Will be filled later by branch parsing
-    };
-  }
-
   /**
-   * Fetch branch information for all commits using git branch --contains.
-   * This is done in a single batch call for efficiency.
+   * Synchronous version for small repos or fallback.
    */
-  async enrichWithBranches(): Promise<void> {
-    const shaList = this.commits.map(c => c.sha);
-    const batchSize = 50;
-    const branchMap = new Map<string, string[]>();
-
-    for (let i = 0; i < shaList.length; i += batchSize) {
-      const batch = shaList.slice(i, i + batchSize);
-      const args = ['branch', '--contains', ...batch, '--format=%(refname:short)'];
-      try {
-        const output = execSync('git ' + args.join(' '), { encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024 });
-        const lines = output.trim().split('\
-').filter(l => l.length > 0);
-        for (const line of lines) {
-          // Format: "<branch> <sha>" but git branch --contains with multiple SHAs gives different output
-          // We'll parse each line as a branch name and associate it with the batch
-          // Actually, git branch --contains with multiple SHAs outputs branches for each SHA on separate lines
-          // We need to iterate per SHA
-        }
-        // Simpler approach: run per SHA but with batch parallelism
-        this.emit('progress', { branchEnrich: `${i}/${shaList.length}` });
-      } catch {
-        // Ignore errors for individual branches
-      }
+  parseSync(depth?: number, since?: string): CommitNode[] {
+    const args = ['log', '--all', '--format=%H|%P|%an|%ae|%at|%s'];
+    if (depth !== undefined) {
+      args.push(`--max-count=${depth}`);
+    }
+    if (since) {
+      args.push(`--since=${since}`);
     }
 
-    // Fallback: use git log with --decorate
-    try {
-      const args = ['log', '--all', '--format=%H %D', `--max-count=${this.commits.length}`];
-      const output = execSync('git ' + args.join(' '), { encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024 });
-      const lines = output.trim().split('\
-').filter(l => l.length > 0);
-      for (const line of lines) {
-        const spaceIdx = line.indexOf(' ');
-        if (spaceIdx === -1) continue;
-        const sha = line.substring(0, spaceIdx);
-        const decorations = line.substring(spaceIdx + 1).trim();
-        if (!decorations || decorations === '') continue;
-        // Decorations look like: "HEAD -> main, origin/main"
-        const branchNames = decorations.split(',').map(d => d.trim().replace(/^HEAD -> /, '').replace(/^origin\//, '')).filter(b => b.length > 0 && !b.includes(':'));
-        const commit = this.commits.find(c => c.sha === sha);
-        if (commit) {
-          commit.branches = branchNames;
-        }
-      }
-    } catch {
-      // Ignore
-    }
-  }
+    const output = execSync('git', args, { encoding: 'utf-8' });
+    const lines = output.trim().split('\n');
+    const commits: CommitNode[] = [];
 
-  getCommits(): CommitNode[] {
-    return this.commits;
+    for (const line of lines) {
+      if (line.trim() === '') continue;
+      const parts = line.split('|');
+      if (parts.length < 6) continue;
+
+      const [sha, parentsStr, authorName, authorEmail, timestampStr, ...messageParts] = parts;
+      const message = messageParts.join('|');
+      const parents = parentsStr ? parentsStr.split(' ') : [];
+      const timestamp = parseInt(timestampStr, 10);
+
+      commits.push({
+        sha,
+        parents,
+        author: { name: authorName, email: authorEmail },
+        timestamp,
+        message,
+        branches: [],
+      });
+    }
+
+    return commits;
   }
 }
 
 /**
- * Legacy synchronous parser — kept for backward compatibility.
- * @deprecated Use CommitParser class for batch parsing with progress.
+ * Convenience wrapper for synchronous parsing.
  */
 export function parseGitLog(depth?: number, since?: string): CommitNode[] {
-  const args = ['log', '--all', '--format=%H|%P|%an|%ae|%at|%s'];
-  if (depth !== undefined) {
-    args.push(`--max-count=${depth}`);
-  }
-  if (since) {
-    args.push(`--since=${since}`);
-  }
-
-  const output = execSync('git ' + args.join(' '), { encoding: 'utf-8' });
-  const lines = output.trim().split('\
-').filter(l => l.length > 0);
-
-  const commits: CommitNode[] = [];
-  for (const line of lines) {
-    const parts = line.split('|');
-    if (parts.length < 6) continue;
-
-    const [sha, parentsRaw, name, email, ts, ...msgParts] = parts;
-    const parents = parentsRaw ? parentsRaw.split(' ') : [];
-    const timestamp = parseInt(ts, 10);
-    if (isNaN(timestamp)) continue;
-    const message = msgParts.join('|');
-
-    commits.push({
-      sha,
-      parents,
-      author: { name, email }
+  const parser = new CommitParser();
+  return parser.parseSync(depth, since);
+}
